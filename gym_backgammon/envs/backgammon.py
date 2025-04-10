@@ -6,7 +6,7 @@ BLACK = 1
 NUM_POINTS = 24  # Number of board positions
 BAR = "bar"
 OFF = 'off'
-TOKEN = {WHITE: "X", BLACK: "O"}
+TOKEN = {WHITE: "W", BLACK: "B"}
 COLORS = {WHITE: "White", BLACK: 'Black'}
 
 BackgammonState = namedtuple('BackgammonState', ['board', 'bar', 'off', 'players_positions'])
@@ -58,7 +58,7 @@ class Backgammon:
 		self.off = [0, 0]  # Number of white checkers off board, number of black checkers off board
 		self.players_home_positions = {WHITE: [5, 4, 3, 2, 1, 0], BLACK: [18, 19, 20, 21, 22, 23]}
 		self.players_positions = self.get_players_positions()
-		self.state = self.save_state()
+		self.state = self.save_state()  # it will ONLY changed when doing save_state()
 
 	def can_bear_off(self, player):
 		tot = [self.board[position][0] for position in self.players_home_positions[player] if player == self.board[position][1]]
@@ -1383,6 +1383,9 @@ class Backgammon:
 		return player_positions
 	
 	def get_valid_plays(self, player, roll):
+		# if player is 0 (white), roll must be negative
+		assert (player==1 and roll[0]>0) or (player==0 and roll[0]<0)  # added by NB
+		
 		valid_plays = set()
 		top_valid_plays = set()
 
@@ -1461,7 +1464,9 @@ class Backgammon:
 		return BackgammonState(board=self.board[:], bar=self.bar[:], off=self.off[:], players_positions=self.players_positions[:])
 
 	def restore_state(self, old_state):
-		self.board, self.bar, self.off, self.players_positions = old_state.board[:], old_state.bar[:], old_state.off[:], old_state.players_positions[:]
+		# Note that the [:] notation creates a copy.
+		self.board, self.bar, self.off, self.players_positions = (old_state.board[:], old_state.bar[:],
+		                                                          old_state.off[:], old_state.players_positions[:])
 		self.state = BackgammonState(board=self.board, bar=self.bar, off=self.off, players_positions=self.players_positions)
 
 	# def get_reward(self):
@@ -1510,14 +1515,14 @@ class Backgammon:
 		"""
 		- encode each point (24) with 4 units => 4 * 24 = 96
 		- for each player => 96 * 2 = 192
-		- 2 units indicating who is the current player
 		- 2 units for white and black bar checkers
 		- 2 units for white and block off checkers
+		- 2 units indicating who is the current player (that should throw the dice)
 		- tot = 192 + 2 + 2 + 2 = 198
 		"""
 		features_vector = []
 		for p in [WHITE, BLACK]:
-			for point in range(0, NUM_POINTS):
+			for point in range(0, NUM_POINTS):  # 24
 				checkers, player = self.board[point]
 				if player == p and checkers > 0:
 					if checkers == 1:
@@ -1532,10 +1537,8 @@ class Backgammon:
 			features_vector += [self.bar[p] / 2.0, self.off[p] / 15.0]
 
 		if current_player == WHITE:
-			# features_vector += [0.0, 1.0]
 			features_vector += [1.0, 0.0]
 		else:
-			# features_vector += [1.0, 0.0]
 			features_vector += [0.0, 1.0]
 		assert len(features_vector) == 198, print("Should be 198 instead of {}".format(len(features_vector)))
 		return features_vector
@@ -1565,3 +1568,47 @@ def print_assert(game, sum_white, sum_black, bar, off, action, old_board):
 		game.board = old_board
 		game.render()
 	print("sum_white={} | sum_black={} | bar={} | off={} | action={}".format(sum_white, sum_black, bar, off, action))
+
+
+import base64
+
+
+def from_backgammon_to_position_id(backgammon_instance, player_on_roll):
+	"""
+	In gnubg display, me (the proponent) always move from 24->1 counterclockwise. so to corrleate it to board state here that I am going from 24->1
+	I must pass value of BLACK (1) to this function, unless I walk from 1->24, and then pass WHITE (0)
+	https://www.gnu.org/software/gnubg/manual/html_node/A-technical-description-of-the-Position-ID.html
+	"""
+	def board_array(player):
+		arr_of_bits = ""    # 24 points + bar at index 24
+		if player == WHITE: enumerator = enumerate(backgammon_instance.board[::-1])
+		else: enumerator = enumerate(backgammon_instance.board)
+		
+		for i, (count, color) in enumerator:
+			if color == 1-player: arr_of_bits += "1" * count + "0"
+			else: arr_of_bits += "0"
+		
+		arr_of_bits += "1" * backgammon_instance.bar[player] + "0"
+		return arr_of_bits
+	
+	bits = board_array(player_on_roll) + board_array(1-player_on_roll)
+	# bits = board_array(0) + board_array(1)
+	
+	bits = bits.ljust(80, '0')  # Pad to 80 bits
+	
+	byte_array = bytearray(10)  # Encode bits into 10-byte little-endian format
+	for i in range(80):
+		byte_index = i // 8
+		bit_index = i % 8
+		if bits[i] == '1':
+			byte_array[byte_index] |= (1 << bit_index)
+		
+	return base64.b64encode(byte_array).decode('ascii')[:14]  # Base64 encode the result (without padding)
+
+
+if __name__ == "__main__":
+	bg = Backgammon()
+	# bg.board[0] , bg.board[1 ] = bg.board[1], bg.board[0]
+	position_id = from_backgammon_to_position_id(bg, player_on_roll=BLACK)
+	print(position_id)  # → 'A+CD8wHgc/ABMA'
+
